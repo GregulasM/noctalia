@@ -934,8 +934,12 @@
   "notifications": {
     "actions": {
       "fallback": "Action",
-      "open": "Open"
+      "open": "Open",
+      "open-app": "Open {app}"
     },
+    "app-launch-failed": "Could not launch {app}.",
+    "app-unavailable": "This application is no longer available.",
+    "open-app-error": "Could not open application",
     "inline-reply": {
       "button": "Reply",
       "placeholder": "Type a reply…"

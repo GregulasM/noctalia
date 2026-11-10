@@ -934,8 +934,12 @@
   "notifications": {
     "actions": {
       "fallback": "Действие",
-      "open": "Открыть"
+      "open": "Открыть",
+      "open-app": "Открыть {app}"
     },
+    "app-launch-failed": "Не удалось запустить {app}.",
+    "app-unavailable": "Это приложение больше недоступно.",
+    "open-app-error": "Не удалось открыть приложение",
     "inline-reply": {
       "button": "Ответить",
       "placeholder": "Введите ответ…"

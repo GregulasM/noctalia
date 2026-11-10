@@ -63,6 +63,7 @@ private:
   void toggleNotificationExpanded(uint32_t id);
   void toggleGroupExpanded(const std::string& key);
   void invokeNotificationAction(uint32_t id, const std::string& actionKey);
+  void openNotificationApp(uint32_t id);
   bool refreshDataSnapshot();
   void syncDndButton();
   void updateEmptyState(bool hasHistory, bool hasFiltered);
@@ -97,6 +98,7 @@ private:
   std::unordered_set<uint32_t> m_expandedIds;
   std::unordered_set<std::string> m_expandedGroupKeys;
   std::uint64_t m_lastSerial = 0;
+  std::uint64_t m_lastDesktopEntriesVersion = 0;
   /// Wall-clock coarse slot so relative times (e.g. "2 min ago") refresh without churning every frame.
   std::int64_t m_lastRelativeTimeSlot = -1;
   std::size_t m_lastRebuildFilterIndex = static_cast<std::size_t>(-1);

@@ -2,6 +2,7 @@
 
 #include "compositors/compositor_platform.h"
 #include "config/config_service.h"
+#include "core/deferred_call.h"
 #include "core/input/keybind_matcher.h"
 #include "core/log.h"
 #include "i18n/i18n.h"
@@ -9,6 +10,7 @@
 #include "notification/notification.h"
 #include "notification/notification_display_name.h"
 #include "notification/notification_manager.h"
+#include "notification/notifications.h"
 #include "render/animation/animation.h"
 #include "render/core/renderer.h"
 #include "render/core/texture_manager.h"
@@ -16,6 +18,8 @@
 #include "shell/control_center/control_center_panel.h"
 #include "shell/panel/panel_button_style.h"
 #include "shell/panel/panel_manager.h"
+#include "system/app_identity.h"
+#include "system/desktop_entry_launch.h"
 #include "time/time_format.h"
 #include "ui/builders.h"
 #include "ui/controls/flex.h"
@@ -70,14 +74,70 @@ namespace {
     if (actionKey == "default") {
       return i18n::tr("notifications.actions.open");
     }
-    if (actionKey == "inline-reply") {
-      return i18n::tr("notifications.inline-reply.button");
-    }
     return i18n::tr("notifications.actions.fallback");
   }
 
+  std::optional<DesktopEntry> historyDesktopEntry(const Notification& notification) {
+    if (notification.origin != NotificationOrigin::External) {
+      return std::nullopt;
+    }
+    // Resolve only installed applications, never a command or path supplied by the sender.
+    if (notification.desktopEntry.has_value() && !notification.desktopEntry->empty()) {
+      std::string_view key = *notification.desktopEntry;
+      // Telegram's application id itself ends in .desktop (org.telegram.desktop).
+      if (const auto app = app_identity::findDesktopEntryExact(key, desktopEntries()); app.has_value()) {
+        return app;
+      }
+      if (key.ends_with(".desktop")) {
+        key.remove_suffix(std::string_view(".desktop").size());
+        return app_identity::findDesktopEntryExact(key, desktopEntries());
+      }
+      return std::nullopt;
+    }
+    return app_identity::findDesktopEntryExact(notification.appName, desktopEntries());
+  }
+
+  struct HistoryAction {
+    // No key means the local Open application action, not an action sent over D-Bus.
+    std::optional<std::string> key;
+    std::string label;
+  };
+
+  bool historyActionsAvailable(uint32_t id, const NotificationManager& notifications) {
+    // The persisted active flag may describe the previous shell session.
+    return notifications.hasPendingDBusClose(id)
+        || std::ranges::any_of(notifications.all(), [id](const Notification& notification) {
+             return notification.id == id;
+           });
+  }
+
+  std::vector<HistoryAction>
+  historyActions(const NotificationHistoryEntry& entry, const NotificationManager& notifications, bool canOpenApp) {
+    std::vector<HistoryAction> result;
+    if (historyActionsAvailable(entry.notification.id, notifications)) {
+      const auto& actions = entry.notification.actions;
+      const std::size_t limit = std::min(actions.size(), kMaxNotificationActions * 2);
+      for (std::size_t i = 0; i + 1 < limit; i += 2) {
+        // Inline replies need an editor and cannot be invoked as ordinary action buttons.
+        if (!actions[i].empty() && actions[i] != "inline-reply") {
+          result.push_back({actions[i], historyActionLabel(actions[i], actions[i + 1])});
+        }
+      }
+    }
+    if (canOpenApp) {
+      if (const auto app = historyDesktopEntry(entry.notification);
+          app.has_value() && (!app->exec.empty() || app->dbusActivatable)) {
+        result.push_back({
+            std::nullopt,
+            i18n::tr("notifications.actions.open-app", "app", app->name.empty() ? app->id : app->name),
+        });
+      }
+    }
+    return result;
+  }
+
   float measureHistoryActionsRowHeight(
-      Renderer& renderer, const std::vector<std::string>& actions, float cardTextWidth, float scale
+      Renderer& renderer, const std::vector<HistoryAction>& actions, float cardTextWidth, float scale
   ) {
     if (actions.empty()) {
       return 0.0F;
@@ -88,15 +148,10 @@ namespace {
     });
 
     std::vector<std::unique_ptr<Button>> buttons;
-    const std::size_t limit = std::min(actions.size(), kMaxNotificationActions * 2);
-    for (std::size_t i = 0; i + 1 < limit; i += 2) {
-      const std::string& actionKey = actions[i];
-      if (actionKey.empty()) {
-        continue;
-      }
+    for (const auto& action : actions) {
       buttons.push_back(
           ui::button({
-              .text = historyActionLabel(actionKey, actions[i + 1]),
+              .text = action.label,
               .fontSize = Style::fontSizeCaption * scale,
               .variant = ButtonVariant::Default,
           })
@@ -238,7 +293,7 @@ namespace {
 
   NotificationCardMetrics measureNotificationCard(
       Renderer& renderer, const NotificationDisplayItem& item, const NotificationHistoryEntry& entry, float scale,
-      float width, bool expandedRequested, bool showHistoryActions
+      float width, bool expandedRequested, const std::vector<HistoryAction>& actions
   ) {
     NotificationCardMetrics metrics;
     const bool isHeader = item.kind == NotificationDisplayItemKind::GroupHeader;
@@ -322,9 +377,7 @@ namespace {
               metrics.expanded ? kExpandedMaxLines : kBodyMaxLines
           );
 
-    const float actionsRowHeight = showHistoryActions
-        ? measureHistoryActionsRowHeight(renderer, entry.notification.actions, metrics.cardTextWidth, scale)
-        : 0.0F;
+    const float actionsRowHeight = measureHistoryActionsRowHeight(renderer, actions, metrics.cardTextWidth, scale);
 
     int visibleSegments = 2;
     if (!metrics.bodyText.empty()) {
@@ -485,12 +538,13 @@ namespace {
 
     void bind(
         Renderer& renderer, const NotificationDisplayItem& item, const NotificationHistoryEntry& entry, float width,
-        bool expanded, bool showHistoryActions, IconResolver& iconResolver, std::optional<ColorSpec> iconTint,
-        std::function<void()> onToggleExpanded, std::function<void()> onRemove,
-        const std::function<void(uint32_t, const std::string&)>& onAction
+        bool expanded, const std::vector<HistoryAction>& actions, IconResolver& iconResolver,
+        std::optional<ColorSpec> iconTint, std::function<void()> onToggleExpanded, std::function<void()> onRemove,
+        const std::function<void(uint32_t, const std::string&)>& onAction,
+        const std::function<void(uint32_t)>& onOpenApp
     ) {
       const NotificationCardMetrics metrics =
-          measureNotificationCard(renderer, item, entry, m_scale, width, expanded, showHistoryActions);
+          measureNotificationCard(renderer, item, entry, m_scale, width, expanded, actions);
       setMinWidth(width);
       setSize(width, metrics.height);
 
@@ -582,23 +636,20 @@ namespace {
         m_actionsRow->removeChild(m_actionsRow->children().back().get());
       }
       m_actionsRow->setVisible(false);
-      if (item.kind != NotificationDisplayItemKind::GroupHeader
-          && showHistoryActions
-          && !entry.notification.actions.empty()) {
+      if (item.kind != NotificationDisplayItemKind::GroupHeader && !actions.empty()) {
         std::vector<std::unique_ptr<Button>> buttons;
-        const std::size_t limit = std::min(entry.notification.actions.size(), kMaxNotificationActions * 2);
-        for (std::size_t i = 0; i + 1 < limit; i += 2) {
-          const std::string& actionKey = entry.notification.actions[i];
-          if (actionKey.empty()) {
-            continue;
-          }
+        for (const auto& action : actions) {
           auto button = ui::button({
-              .text = historyActionLabel(actionKey, entry.notification.actions[i + 1]),
+              .text = action.label,
               .fontSize = Style::fontSizeCaption * m_scale,
               .variant = ButtonVariant::Default,
           });
-          button->setOnClick([onAction, id = entry.notification.id, key = std::string(actionKey)] {
-            onAction(id, key);
+          button->setOnClick([onAction, onOpenApp, id = entry.notification.id, key = action.key] {
+            if (key.has_value()) {
+              onAction(id, *key);
+            } else {
+              onOpenApp(id);
+            }
           });
           buttons.push_back(std::move(button));
         }
@@ -758,6 +809,8 @@ public:
     revision ^= static_cast<std::uint64_t>(Style::cornerRadiusScale() * 10000.0F) * 0xC2B2AE3D27D4EB4FULL;
     revision ^= (static_cast<std::uint64_t>(item.totalCount) << 16U);
     revision ^= (static_cast<std::uint64_t>(item.kind) << 48U);
+    revision ^= m_owner.m_lastDesktopEntriesVersion * 0x165667B19E3779F9ULL;
+    revision ^= historyActionsAvailable(entry->notification.id, *m_owner.m_notifications) ? 0x85EBCA77C2B2AE63ULL : 0;
     return revision;
   }
 
@@ -771,8 +824,8 @@ public:
       return 1.0F;
     }
     const bool expanded = m_owner.m_expandedIds.contains(entry->notification.id);
-    const bool showHistoryActions = m_owner.m_notifications->hasPendingDBusClose(entry->notification.id);
-    return measureNotificationCard(renderer, item, *entry, m_scale, width, expanded, showHistoryActions).height;
+    const auto actions = historyActions(*entry, *m_owner.m_notifications, m_owner.m_platform != nullptr);
+    return measureNotificationCard(renderer, item, *entry, m_scale, width, expanded, actions).height;
   }
 
   [[nodiscard]] std::unique_ptr<Node> createItem() override {
@@ -807,11 +860,12 @@ public:
         m_owner.removeNotificationEntry(id, active);
       };
     }
-    const bool showHistoryActions = m_owner.m_notifications->hasPendingDBusClose(entry->notification.id);
+    const auto actions = historyActions(*entry, *m_owner.m_notifications, m_owner.m_platform != nullptr);
     row->bind(
-        renderer, displayItem, *entry, width, m_owner.m_expandedIds.contains(entry->notification.id),
-        showHistoryActions, m_owner.m_iconResolver, m_owner.m_lastIconTint, std::move(onToggle), std::move(onRemove),
-        [this](uint32_t id, const std::string& key) { m_owner.invokeNotificationAction(id, key); }
+        renderer, displayItem, *entry, width, m_owner.m_expandedIds.contains(entry->notification.id), actions,
+        m_owner.m_iconResolver, m_owner.m_lastIconTint, std::move(onToggle), std::move(onRemove),
+        [this](uint32_t id, const std::string& key) { m_owner.invokeNotificationAction(id, key); },
+        [this](uint32_t id) { m_owner.openNotificationApp(id); }
     );
   }
 
@@ -1271,7 +1325,7 @@ void NotificationsTab::toggleGroupExpanded(const std::string& key) {
 }
 
 void NotificationsTab::invokeNotificationAction(uint32_t id, const std::string& actionKey) {
-  if (m_notifications == nullptr || actionKey.empty() || !m_notifications->hasPendingDBusClose(id)) {
+  if (m_notifications == nullptr || actionKey.empty()) {
     return;
   }
   const std::string activationToken =
@@ -1292,6 +1346,43 @@ void NotificationsTab::invokeNotificationAction(uint32_t id, const std::string& 
   PanelManager::instance().refresh();
 }
 
+void NotificationsTab::openNotificationApp(uint32_t id) {
+  if (m_notifications == nullptr || m_platform == nullptr) {
+    return;
+  }
+  const auto* entry = m_notifications->findHistoryEntry(id);
+  if (entry == nullptr) {
+    return;
+  }
+  const auto app = historyDesktopEntry(entry->notification);
+  if (!app.has_value()) {
+    notify::error("Noctalia", i18n::tr("notifications.open-app-error"), i18n::tr("notifications.app-unavailable"));
+    return;
+  }
+
+  desktop_entry_launch::LaunchOptions options{
+      .activationToken = m_platform->requestActivationToken(m_platform->lastPointerSurface()),
+      .runAsSystemdService = m_config != nullptr && m_config->config().shell.launchAppsAsSystemdServices,
+      .customCommand = m_config != nullptr ? m_config->config().shell.launchAppsCustomCommand : std::string{},
+  };
+  // Closing the panel may destroy its rows. Do not retain the tab or its callbacks across that close.
+  DeferredCall::callLater([platform = m_platform, app = *app, options = std::move(options)] {
+    const auto windows = platform->enrichedWindowsForApp(app.idLower, app.startupWmClassLower);
+    if (!windows.empty()) {
+      PanelManager::instance().closePanel(false);
+      platform->activateToplevelInfo(windows.front());
+    } else if (desktop_entry_launch::launchEntry(app, options)) {
+      PanelManager::instance().closePanel(false);
+    } else {
+      kLog.warn("notification history: failed to open app '{}'", app.id);
+      notify::error(
+          "Noctalia", i18n::tr("notifications.open-app-error"),
+          i18n::tr("notifications.app-launch-failed", "app", app.name.empty() ? app.id : app.name)
+      );
+    }
+  });
+}
+
 bool NotificationsTab::refreshDataSnapshot() {
   const bool hasHistory = m_notifications != nullptr && !m_notifications->history().empty();
   if (m_clearAllButton != nullptr) {
@@ -1302,10 +1393,12 @@ bool NotificationsTab::refreshDataSnapshot() {
   const bool groupByApp = m_config != nullptr ? m_config->config().notification.groupByApp : true;
   const std::uint64_t serial = m_notifications != nullptr ? m_notifications->changeSerial() : 0;
   const std::int64_t relativeSlot = currentRelativeTimeSlot();
+  const std::uint64_t desktopVersion = desktopEntriesVersion();
   const bool changed = serial != m_lastSerial
       || relativeSlot != m_lastRelativeTimeSlot
       || m_filterIndex != m_lastRebuildFilterIndex
-      || groupByApp != m_lastGroupByApp;
+      || groupByApp != m_lastGroupByApp
+      || desktopVersion != m_lastDesktopEntriesVersion;
   if (!changed) {
     updateEmptyState(hasHistory, !m_filtered.empty());
     return false;
@@ -1411,6 +1504,7 @@ bool NotificationsTab::refreshDataSnapshot() {
   }
 
   m_lastSerial = serial;
+  m_lastDesktopEntriesVersion = desktopVersion;
   m_lastRelativeTimeSlot = relativeSlot;
   m_lastRebuildFilterIndex = m_filterIndex;
   m_lastGroupByApp = groupByApp;

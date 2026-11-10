@@ -126,6 +126,12 @@ This affects new notifications only. Use `noctalia msg notification-clear-histor
 
 Shell notifications are toast-only and are not kept in history, with one exception: [calendar reminders](/noctalia/services/calendar/#reminders) are retained, because a reminder missed while you were away has no other place to surface. They appear under the app name `Calendar`, so a filter matching that name controls their toast, sound, and history like any other notification.
 
+## Opening notifications from history
+
+History keeps the sender's actions available while a notification is active or has only timed out. Using an action or dismissing the notification ends those actions; they are not restored after restarting the shell.
+
+For recognized installed applications, each history card also has an **Open app** button labeled with the application's name. It focuses an existing window or launches the application and remains available after the original actions expire, including for history restored after a restart. It opens the application itself; returning to a particular message still requires a working action from the sender. Removing a history entry removes its button as well.
+
 ## Related IPC
 
 For Do Not Disturb status/toggle commands and notification clear actions, see [Media & UI → Notifications](/noctalia/ipc/media-and-ui/#notifications).
