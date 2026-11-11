@@ -570,6 +570,9 @@ bool NotificationManager::invokeAction(
     return false;
   }
 
+  const bool keepHistoryAction =
+      actionKey == "default" && notification->origin == NotificationOrigin::External && m_historyIndex.contains(id);
+
   // Internal notifications have no D-Bus owner, so their actions are dispatched in-process instead.
   if (notification->origin == NotificationOrigin::Internal) {
     if (m_internalActionCallback) {
@@ -579,7 +582,21 @@ bool NotificationManager::invokeAction(
     m_actionInvokeCallback(id, actionKey, activationToken, notification->sender);
   }
 
-  if (closeAfterInvoke) {
+  if (closeAfterInvoke && keepHistoryAction) {
+    // Hide a live toast just as on timeout, without telling the sender to discard
+    // the callback. The same default action may still open this message from history.
+    if (m_idToIndex.contains(id)) {
+      close(id, CloseReason::Expired);
+    }
+    if (const auto it = m_historyIndex.find(id); it != m_historyIndex.end()) {
+      const bool hadUnreadBefore = computeHasUnreadNotificationHistory();
+      auto& entry = m_history[it->second];
+      entry.seen = true;
+      entry.eventSerial = ++m_changeSerial;
+      schedulePersistHistory();
+      notifyUnreadStateChangedIfNeeded(hadUnreadBefore);
+    }
+  } else if (closeAfterInvoke) {
     dismissAfterInvoke(id);
   }
   return true;

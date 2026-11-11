@@ -128,9 +128,11 @@ Shell notifications are toast-only and are not kept in history, with one excepti
 
 ## Opening notifications from history
 
-History keeps the sender's actions available while a notification is active or has only timed out. Using an action or dismissing the notification ends those actions; they are not restored after restarting the shell.
+History uses the actions supplied by the sender, such as **Activate** for browser notifications. These actions open the notification's target rather than merely launching the application.
 
-For recognized installed applications, each history card also has an **Open app** button labeled with the application's name. It focuses an existing window or launches the application and remains available after the original actions expire, including for history restored after a restart. It opens the application itself; returning to a particular message still requires a working action from the sender. Removing a history entry removes its button as well.
+The default action on an external notification hides its toast and marks the history entry as seen, without discarding the sender's callback. It can be used again from history while the sender still retains it. Other actions, such as marking a message as read, keep their normal completion behavior.
+
+The sender can withdraw a notification, for example after its message is read. Its actions then become unavailable. Explicitly dismissing or deleting the notification also ends its actions. Restarting the shell does not restore callbacks from the previous session: stored notification text and action labels alone cannot recreate a message link. History does not replace an unavailable action with an application-launch button.
 
 ## Related IPC
 
