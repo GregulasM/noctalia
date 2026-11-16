@@ -1395,6 +1395,22 @@ void ClipboardService::finishRead(bool discard) {
     notifyChanged();
     return;
   }
+
+  // XWayland clients such as GLFW can offer UTF8_STRING/STRING without a
+  // MIME text type. Some native clients cannot paste that offer at all, and
+  // every read otherwise has to go back through the X11 owner. Once captured,
+  // serve plain UTF-8 text directly, just as selecting its history entry does.
+  // Only take over text-only legacy offers: replacing a richer selection would
+  // discard formats we did not read. Our own offer includes text/plain, so its
+  // echo never triggers another takeover. STRING/TEXT alone are not UTF-8.
+  const bool legacyUtf8TextOnly =
+      mimeType == "UTF8_STRING" && std::ranges::all_of(mimeTypes, [](const std::string& type) {
+        return type == "UTF8_STRING" || type == "STRING" || type == "TEXT";
+      });
+  if (legacyUtf8TextOnly && !copyData(mimeTypesForPayload(mimeType), data)) {
+    kLog.warn("could not publish legacy UTF-8 clipboard text with standard MIME types");
+  }
+
   // Paste and scripts follow the live text, so a selection history declines to
   // keep still has to be reported.
   const std::uint64_t serialBefore = m_changeSerial;
